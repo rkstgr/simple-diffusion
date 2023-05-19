@@ -1,6 +1,12 @@
 from simple_diffusion import UViT, GaussianDiffusion
 from trainer import Trainer
 
+import argparse
+
+parser = argparse.ArgumentParser(description='Train diffusion model.')
+parser.add_argument('--image-path', type=str, required=True, help='Path to the directory containing training images.')
+args = parser.parse_args()
+
 model = UViT(
     dim=64
 )
@@ -12,7 +18,7 @@ diffusion = GaussianDiffusion(
 
 trainer = Trainer(
     diffusion,
-    'path/to/your/images',
+    args.image_path,
     train_batch_size = 32,
     train_lr = 1e-3,
     train_num_steps = 100_000,         # total training steps
@@ -22,5 +28,6 @@ trainer = Trainer(
     save_and_sample_every = 5000,     # every 1000 steps, save checkpoint + sample imgs
     calculate_fid = True              # whether to calculate fid during training
 )
+
 
 trainer.train()
