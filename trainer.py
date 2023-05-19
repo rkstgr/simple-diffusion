@@ -1,5 +1,6 @@
 from functools import partial
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,7 @@ from einops import rearrange, repeat
 from ema_pytorch import EMA
 from pytorch_fid.fid_score import calculate_frechet_distance
 from pytorch_fid.inception import InceptionV3
+from multiprocessing import cpu_count
 from tqdm import tqdm
 
 def has_int_squareroot(x):
@@ -139,7 +141,14 @@ class Trainer(object):
         # dataset and dataloader
 
         self.ds = ImageDataset(folder, self.image_size, augment_horizontal_flip = augment_horizontal_flip, convert_image_to = convert_image_to)
-        dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())
+
+        if "SLURM_CPUS_ON_NODE" in os.environ:
+            num_workers = int(os.environ["SLURM_CPUS_ON_NODE"])
+        else:
+            num_workers = cpu_count()
+
+        print(f'num_workers: {num_workers}')
+        dl = DataLoader(self.ds, batch_size=train_batch_size, shuffle=True, pin_memory=True, num_workers=num_workers)
 
         dl = self.accelerator.prepare(dl)
         self.dl = cycle(dl)
