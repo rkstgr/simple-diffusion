@@ -1,5 +1,6 @@
 # simple-diffusion
 Implementation in Pytorch of simple diffusion: End-to-end diffusion for high resolution images.
+Code is based on this [repo](https://github.com/lucidrains/denoising-diffusion-pytorch)
 
 # TODO
 - [ ] Implement architecture
