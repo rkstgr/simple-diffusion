@@ -18,6 +18,8 @@ from pytorch_fid.fid_score import calculate_frechet_distance
 from pytorch_fid.inception import InceptionV3
 from multiprocessing import cpu_count
 from tqdm import tqdm
+import wandb
+from lion_pytorch import Lion
 
 def has_int_squareroot(x):
     return int(x**0.5)**2 == x
@@ -98,10 +100,12 @@ class Trainer(object):
         split_batches = True,
         convert_image_to = None,
         calculate_fid = True,
-        inception_block_idx = 2048
+        inception_block_idx = 2048,
+        wandb_project_name = None,
+        use_lion_optimizer = False,
     ):
         super().__init__()
-
+        config = locals()
         # accelerator
 
         self.accelerator = Accelerator(
@@ -154,14 +158,22 @@ class Trainer(object):
         self.dl = cycle(dl)
 
         # optimizer
-
-        self.opt = Adam(diffusion_model.parameters(), lr = train_lr, betas = adam_betas)
+        if use_lion_optimizer:
+            self.opt = Lion(diffusion_model.parameters(), lr = train_lr, betas = adam_betas, weight_decay=1e-2, use_triton=True)
+        else:
+            self.opt = Adam(diffusion_model.parameters(), lr = train_lr, betas = adam_betas)
 
         # for logging results in a folder periodically
 
         if self.accelerator.is_main_process:
             self.ema = EMA(diffusion_model, beta = ema_decay, update_every = ema_update_every)
             self.ema.to(self.device)
+
+            if wandb_project_name is not None:
+                wandb.init(project=wandb_project_name, config=config)
+                self.using_wandb = True
+            else:
+                self.using_wandb = False
 
         self.results_folder = Path(results_folder)
         self.results_folder.mkdir(exist_ok = True)
@@ -242,6 +254,8 @@ class Trainer(object):
         accelerator = self.accelerator
         device = accelerator.device
 
+        already_logged_train_images = False
+
         with tqdm(initial = self.step, total = self.train_num_steps, disable = not accelerator.is_main_process) as pbar:
 
             while self.step < self.train_num_steps:
@@ -250,6 +264,10 @@ class Trainer(object):
 
                 for _ in range(self.gradient_accumulate_every):
                     data = next(self.dl).to(device)
+
+                    if self.using_wandb and not already_logged_train_images and accelerator.is_main_process:
+                        wandb.log({"train_images": [wandb.Image(x) for x in data[:min(25, len(data))]]})
+                        already_logged_train_images = True
 
                     with self.accelerator.autocast():
                         loss = self.model(data)
@@ -272,6 +290,9 @@ class Trainer(object):
                 if accelerator.is_main_process:
                     self.ema.update()
 
+                    if self.using_wandb:
+                        wandb.log({"loss": total_loss}, step = self.step)
+
                     if self.step != 0 and self.step % self.save_and_sample_every == 0:
                         self.ema.ema_model.eval()
 
@@ -285,11 +306,15 @@ class Trainer(object):
                         utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = int(math.sqrt(self.num_samples)))
                         self.save(milestone)
 
-                        # whether to calculate fid
+                        if self.using_wandb:
+                            wandb.log({"samples": [wandb.Image(x) for x in all_images[:min(25, len(all_images))]]}, step = self.step)
 
+                        # whether to calculate fid
                         if exists(self.inception_v3):
                             fid_score = self.fid_score(real_samples = data, fake_samples = all_images)
                             accelerator.print(f'fid_score: {fid_score}')
+                            if self.using_wandb:
+                                wandb.log({"fid_score": fid_score}, step = self.step)
 
                 pbar.update(1)
 
