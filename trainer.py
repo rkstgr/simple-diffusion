@@ -20,6 +20,8 @@ from multiprocessing import cpu_count
 from tqdm import tqdm
 import wandb
 from lion_pytorch import Lion
+from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
+from torch_optimizer import Lamb
 
 def has_int_squareroot(x):
     return int(x**0.5)**2 == x
@@ -91,7 +93,7 @@ class Trainer(object):
         train_num_steps = 100000,
         ema_update_every = 10,
         ema_decay = 0.995,
-        adam_betas = (0.9, 0.99),
+        adam_betas = (0.9, 0.999),
         save_and_sample_every = 1000,
         num_samples = 25,
         results_folder = './results',
@@ -102,7 +104,7 @@ class Trainer(object):
         calculate_fid = True,
         inception_block_idx = 2048,
         wandb_project_name = None,
-        use_lion_optimizer = False,
+        optimizer="adam"
     ):
         super().__init__()
         config = locals()
@@ -158,12 +160,23 @@ class Trainer(object):
         self.dl = cycle(dl)
 
         # optimizer
-        if use_lion_optimizer:
-            self.opt = Lion(diffusion_model.parameters(), lr = train_lr, betas = adam_betas, weight_decay=1e-2, use_triton=True)
-        else:
+        if optimizer == "lion":
+            self.opt = Lion(diffusion_model.parameters(), lr = train_lr, betas = (0.9, 0.98), weight_decay=1e-1, use_triton=False)
+        elif optimizer == "adam":
             self.opt = Adam(diffusion_model.parameters(), lr = train_lr, betas = adam_betas)
+        elif optimizer == "lamb":
+            self.opt = Lamb(diffusion_model.parameters(), lr = train_lr, betas = (0.9, 0.999), weight_decay=1e-2, eps=1e-6)
+
+        self.scheduler = CosineAnnealingWarmupRestarts(self.opt,
+                                          first_cycle_steps=train_num_steps,
+                                          cycle_mult=1.0,
+                                          max_lr=train_lr,
+                                          min_lr=train_lr/10,
+                                          warmup_steps=train_num_steps//80,
+                                          gamma=1.0)
 
         # for logging results in a folder periodically
+        self.using_wandb = False
 
         if self.accelerator.is_main_process:
             self.ema = EMA(diffusion_model, beta = ema_decay, update_every = ema_update_every)
@@ -172,8 +185,7 @@ class Trainer(object):
             if wandb_project_name is not None:
                 wandb.init(project=wandb_project_name, config=config)
                 self.using_wandb = True
-            else:
-                self.using_wandb = False
+                
 
         self.results_folder = Path(results_folder)
         self.results_folder.mkdir(exist_ok = True)
@@ -184,7 +196,7 @@ class Trainer(object):
 
         # prepare model, dataloader, optimizer with accelerator
 
-        self.model, self.opt = self.accelerator.prepare(self.model, self.opt)
+        self.model, self.opt, self.scheduler = self.accelerator.prepare(self.model, self.opt, self.scheduler)
 
     @property
     def device(self):
@@ -198,6 +210,7 @@ class Trainer(object):
             'step': self.step,
             'model': self.accelerator.get_state_dict(self.model),
             'opt': self.opt.state_dict(),
+            'scheduler': self.scheduler.state_dict(),
             'ema': self.ema.state_dict(),
             'scaler': self.accelerator.scaler.state_dict() if exists(self.accelerator.scaler) else None,
             'version': "0.1.0"
@@ -216,6 +229,7 @@ class Trainer(object):
 
         self.step = data['step']
         self.opt.load_state_dict(data['opt'])
+        self.scheduler.load_state_dict(data['scheduler'])
         if self.accelerator.is_main_process:
             self.ema.load_state_dict(data["ema"])
 
@@ -286,12 +300,14 @@ class Trainer(object):
 
                 accelerator.wait_for_everyone()
 
+                self.scheduler.step()
+
                 self.step += 1
                 if accelerator.is_main_process:
                     self.ema.update()
 
                     if self.using_wandb:
-                        wandb.log({"loss": total_loss}, step = self.step)
+                        wandb.log({"loss": total_loss, "lr": self.scheduler.get_lr()[0]}, step = self.step)
 
                     if self.step != 0 and self.step % self.save_and_sample_every == 0:
                         self.ema.ema_model.eval()

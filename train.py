@@ -23,16 +23,16 @@ diffusion = GaussianDiffusion(
 trainer = Trainer(
     diffusion,
     args.image_path,
-    train_batch_size = 256,
-    train_lr = 1e-5,
+    train_batch_size = 512,
+    train_lr = 3e-5,
     train_num_steps = 100_000,         # total training steps
-    gradient_accumulate_every = 1,    # gradient accumulation steps
+    gradient_accumulate_every = 2,    # gradient accumulation steps
     ema_decay = 0.995,                # exponential moving average decay
     amp = True,                       # turn on mixed precision
     save_and_sample_every = 1000,     # every 1000 steps, save checkpoint + sample imgs
     calculate_fid = True,              # whether to calculate fid during training
     wandb_project_name="simple-diffusion",
-    use_lion_optimizer=True,
+    optimizer="lion"
 )
 
 if args.milestone is not None:
